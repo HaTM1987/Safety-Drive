@@ -1,0 +1,93 @@
+
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    
+    <!-- PWA Settings for iOS -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Safety Drive">
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3202/3202926.png">
+    <link rel="manifest" href="/manifest.json">
+
+    <title>Safety Drive VN</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+      :root {
+        --safe-top: env(safe-area-inset-top, 47px);
+        --safe-bottom: env(safe-area-inset-bottom, 34px);
+      }
+      body {
+        background-color: #000;
+        color: white;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        overscroll-behavior: none;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .iphone-12-pro-container {
+        width: 100vw;
+        height: 100vh;
+        max-width: 100%;
+        max-height: 100%;
+        margin: 0 auto;
+        position: relative;
+        overflow: hidden;
+        background: #000;
+        display: flex;
+        flex-direction: column;
+      }
+      /* Desktop simulation mode */
+      @media (min-width: 440px) {
+        body {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+          background: #111;
+        }
+        .iphone-12-pro-container {
+          width: 390px;
+          height: 844px;
+          border-radius: 54px;
+          border: 10px solid #222;
+          box-shadow: 0 0 100px rgba(0,0,0,0.9);
+        }
+      }
+      /* Map CSS Fixes */
+      .leaflet-container {
+        background: #1f2937 !important;
+        width: 100% !important;
+        height: 100% !important;
+      }
+      /* Ẩn attribution của leaflet cho gọn trên mobile */
+      .leaflet-control-attribution {
+        display: none;
+      }
+    </style>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.563.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.39.0"
+  }
+}
+</script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
