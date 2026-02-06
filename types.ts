@@ -4,6 +4,8 @@ export enum AppState {
   Driving = 'Driving'
 }
 
+export type ViewMode = 'heading-up' | 'north-up';
+
 export interface Coordinates {
   lat: number;
   lng: number;

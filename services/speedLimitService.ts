@@ -1,11 +1,11 @@
 
 export const fetchRealSpeedLimit = async (lat: number, lng: number): Promise<number | null> => {
   try {
-    // Tăng bán kính tìm kiếm lên 70m để bắt được đường ngay cả khi GPS lệch nhẹ
-    // Lấy thông tin chi tiết về loại đường và maxspeed
+    // Truy vấn OSM xung quanh vị trí xe (bán kính 20m)
+    // Chỉ lấy các con đường (way) có thẻ highway (đường giao thông)
     const query = `
       [out:json][timeout:4];
-      way(around:70, ${lat}, ${lng})["highway"];
+      way(around:20, ${lat}, ${lng})["highway"];
       out tags;
     `;
     const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
@@ -14,42 +14,72 @@ export const fetchRealSpeedLimit = async (lat: number, lng: number): Promise<num
     if (!response.ok) throw new Error("API Connection Failed");
     
     const data = await response.json();
+    const elements = data.elements || [];
 
-    if (data.elements && data.elements.length > 0) {
-      // Tìm đường có thẻ maxspeed trước
-      const waysWithSpeed = data.elements.filter((e: any) => e.tags.maxspeed);
-      
-      // Nếu tìm thấy đường có biển báo tốc độ, ưu tiên dùng ngay
-      if (waysWithSpeed.length > 0) {
-        const tags = waysWithSpeed[0].tags;
-        const speedStr = tags.maxspeed.split(';')[0].replace(/[^\d]/g, ''); // Xử lý format lạ
-        const speed = parseInt(speedStr);
-        if (!isNaN(speed)) return speed;
-      }
+    if (elements.length === 0) return null;
 
-      // Nếu không có maxspeed, dùng đường gần nhất/đầu tiên tìm thấy để suy luận
-      const tags = data.elements[0].tags;
-      const highway = tags.highway;
+    // Lọc ra các loại đường hợp lệ cho xe ô tô
+    const validHighways = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'living_street', 'unclassified'];
+    const ways = elements.filter((e: any) => validHighways.includes(e.tags.highway));
+
+    if (ways.length === 0) return null;
+
+    // Chọn con đường gần nhất/quan trọng nhất (Ưu tiên đường lớn)
+    const hierarchy = { 'motorway': 10, 'trunk': 9, 'primary': 8, 'secondary': 7, 'tertiary': 6, 'residential': 5 };
+    ways.sort((a: any, b: any) => {
+      const hA = (hierarchy as any)[a.tags.highway] || 0;
+      const hB = (hierarchy as any)[b.tags.highway] || 0;
+      return hB - hA;
+    });
+
+    const bestWay = ways[0];
+    const tags = bestWay.tags;
+
+    // --- LOGIC XỬ LÝ DỮ LIỆU THỰC TẾ (STRICT MODE) ---
+    
+    // 1. Ưu tiên cao nhất: Thẻ maxspeed (Biển báo cắm trên đường)
+    if (tags.maxspeed) {
+      // Xử lý các trường hợp đặc biệt như "50;40" (lấy max) hoặc "VN:urban"
+      if (tags.maxspeed === 'VN:urban') return 60; // Theo luật VN mới (đường đôi) hoặc 50
+      if (tags.maxspeed === 'VN:rural') return 90; // Theo luật VN mới (đường đôi) hoặc 80
       
-      // Logic suy luận tốc độ theo Luật GTĐB Việt Nam (khi thiếu biển báo)
-      if (highway === 'motorway') return 100; // Cao tốc
-      if (highway === 'motorway_link') return 60; // Đường dẫn cao tốc
-      
-      if (highway === 'trunk') return 80; // Đường đôi/Quốc lộ lớn
-      if (highway === 'primary') return 60; // Đường chính đô thị
-      
-      if (highway === 'secondary' || highway === 'tertiary') return 50; // Đường gom/Đường tỉnh
-      
-      // Khu dân cư, đường nhỏ
-      if (highway === 'residential' || highway === 'living_street' || highway === 'service' || highway === 'unclassified') return 40;
+      const speedStr = tags.maxspeed.split(';')[0].replace(/[^\d]/g, '');
+      const speed = parseInt(speedStr);
+      if (!isNaN(speed)) return speed;
+    }
+
+    // 2. Ưu tiên nhì: Thẻ maxspeed:lanes (Tốc độ theo làn đường)
+    // Ví dụ: 60|60|50 (Làn sát dải phân cách nhanh hơn)
+    // Vì GPS điện thoại không đủ chính xác để biết làn nào, ta lấy tốc độ CAO NHẤT cho phép trên đoạn đường đó
+    if (tags['maxspeed:lanes']) {
+        const laneSpeeds = tags['maxspeed:lanes']
+            .split('|')
+            .map((s: string) => parseInt(s.replace(/[^\d]/g, '')))
+            .filter((n: number) => !isNaN(n));
+        
+        if (laneSpeeds.length > 0) {
+            return Math.max(...laneSpeeds);
+        }
+    }
+
+    // 3. Ưu tiên ba: Thẻ zone (Khu vực quy hoạch)
+    // Nếu dữ liệu map định nghĩa rõ đây là khu đông dân cư
+    if (tags['source:maxspeed'] === 'VN:urban' || tags['zone:traffic'] === 'VN:urban') {
+        // Kiểm tra xem có dải phân cách không để trả về 60 hay 50
+        const isDualCarriageway = tags.oneway === 'yes' || tags.dual_carriageway === 'yes';
+        return isDualCarriageway ? 60 : 50;
     }
     
+    if (tags['source:maxspeed'] === 'VN:rural' || tags['zone:traffic'] === 'VN:rural') {
+        const isDualCarriageway = tags.oneway === 'yes' || tags.dual_carriageway === 'yes';
+        return isDualCarriageway ? 90 : 80;
+    }
+
+    // Nếu không có bất kỳ dữ liệu cụ thể nào -> Trả về NULL (Hiển thị --)
+    // Tuyệt đối không đoán (Interpolation)
     return null;
+
   } catch (error) {
     return null;
   }
-};
-
-export const getVietnameseDefaultLimit = async (lat: number, lng: number): Promise<number> => {
-    return 50; 
 };
