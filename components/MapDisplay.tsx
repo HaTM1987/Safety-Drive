@@ -198,9 +198,9 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     }
   }, [position, heading, mapLoaded]);
 
-  // UPDATE: Sử dụng 25vh để đảm bảo hiển thị đẹp hơn
+  // UPDATE: Giảm translateY từ 25vh xuống 16vh để nâng vị trí xe lên cao hơn, tránh đè vào ruler
   const containerTransform = viewMode === 'heading-up' 
-    ? `translate(-50%, -50%) translateY(25vh) rotate(${-heading}deg)`
+    ? `translate(-50%, -50%) translateY(16vh) rotate(${-heading}deg)`
     : `translate(-50%, -50%) rotate(0deg)`;
 
   return (
