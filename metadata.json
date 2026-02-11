@@ -1,7 +1,9 @@
+
 {
   "name": "Safety Drive VN",
   "description": "Ứng dụng hỗ trợ lái xe an toàn với cảnh báo tốc độ, bản đồ và dẫn đường trực tuyến.",
   "requestFramePermissions": [
-    "geolocation"
+    "geolocation",
+    "microphone"
   ]
 }

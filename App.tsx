@@ -1,14 +1,15 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Square, Compass, Navigation2, ScanEye } from 'lucide-react';
+import { Square, Compass, Navigation2, ScanEye, Mic, Loader2 } from 'lucide-react';
 import { MapDisplay } from './components/MapDisplay';
 import { Dashboard } from './components/Dashboard';
 import { NavigationSetup } from './components/NavigationSetup';
 import { AppState, WarningState, Coordinates, LocationPoint, GpsQuality, MapFeature, ViewMode } from './types';
 import { speak } from './services/ttsService';
 import { getDrivingRoute } from './services/routeService';
-import { fetchRealSpeedLimit } from './services/speedLimitService';
+import { fetchRealSpeedLimit, saveUserSpeedMarker } from './services/speedLimitService';
 import { fetchNearbyMapFeatures } from './services/mapFeaturesService';
+import { askTrafficLawAssistant } from './services/geminiService';
 
 // --- MATH HELPERS FOR BEARING CALCULATION ---
 const toRad = (deg: number) => deg * (Math.PI / 180);
@@ -41,7 +42,6 @@ const getDistanceFromLatLonInM = (lat1: number, lon1: number, lat2: number, lon2
   return d;
 };
 
-// Hàm tính tổng chiều dài lộ trình (dựa trên danh sách toạ độ)
 const calculateRouteLength = (path: Coordinates[]) => {
   let total = 0;
   for (let i = 0; i < path.length - 1; i++) {
@@ -55,27 +55,39 @@ const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('heading-up'); 
 
   const [currentSpeed, setCurrentSpeed] = useState(0);
-  const [speedLimit, setSpeedLimit] = useState<number | null>(null); // Null = Không có dữ liệu thực tế
+  
+  // Speed Limit Logic
+  const [finalSpeedLimit, setFinalSpeedLimit] = useState<number | null>(null);
+  const [autoSpeedLimit, setAutoSpeedLimit] = useState<number | null>(null);
+  const [isUserSaved, setIsUserSaved] = useState(false); 
+  const [manualSpeedLimit, setManualSpeedLimit] = useState<number | null>(null);
+  
   const [position, setPosition] = useState<Coordinates>({ lat: 10.7769, lng: 106.7009 });
   const [heading, setHeading] = useState(0);
   
-  const [routeInfo, setRouteInfo] = useState({ street: 'Lái xe an toàn', nextTurn: 0 });
+  const [routeInfo, setRouteInfo] = useState({ street: 'Đang xác định...', nextTurn: 0 });
   const [routePath, setRoutePath] = useState<Coordinates[] | undefined>(undefined);
   
-  // State mới để chia tách quãng đường
   const [traveledPath, setTraveledPath] = useState<Coordinates[]>([]);
   const [remainingPath, setRemainingPath] = useState<Coordinates[]>([]);
-  const [traveledDistance, setTraveledDistance] = useState(0); // mét
-  const [remainingDistance, setRemainingDistance] = useState(0); // mét
+  const [traveledDistance, setTraveledDistance] = useState(0); 
+  const [remainingDistance, setRemainingDistance] = useState(0); 
   
-  const [routeProgress, setRouteProgress] = useState(0); // 0 -> 1 (0% -> 100%)
-  const [totalDistance, setTotalDistance] = useState(0); // Mét
+  const [routeProgress, setRouteProgress] = useState(0); 
+  const [totalDistance, setTotalDistance] = useState(0); 
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [warning, setWarning] = useState<WarningState>({ type: null, message: '', active: false });
   const [gpsStatus, setGpsStatus] = useState<GpsQuality>('seeking');
   const [mapFeatures, setMapFeatures] = useState<MapFeature[]>([]);
 
+  // AI Assistant State
+  const [isListening, setIsListening] = useState(false); // Trạng thái đang nghe lệnh (Wake word hoặc Query)
+  const [isAiActive, setIsAiActive] = useState(false);   // Trạng thái AI đã được bật (chờ câu hỏi)
+  const [isProcessingAi, setIsProcessingAi] = useState(false);
+  const [aiResponse, setAiResponse] = useState<string | null>(null);
+
+  const recognitionRef = useRef<any>(null);
   const lastLimitUpdatePos = useRef<Coordinates | null>(null);
   const lastFeatureUpdatePos = useRef<Coordinates | null>(null);
 
@@ -101,10 +113,152 @@ const App: React.FC = () => {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // Tính toán tiến độ di chuyển và chia tách lộ trình
+  // --- WAKE WORD & VOICE LOGIC ---
+  useEffect(() => {
+    // Chỉ khởi tạo nhận diện giọng nói khi đang lái xe
+    if (appState !== AppState.Driving) return;
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'vi-VN';
+    recognition.continuous = true; // Nghe liên tục
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+        setIsListening(true);
+    };
+
+    recognition.onresult = async (event: any) => {
+        const lastIndex = event.results.length - 1;
+        const transcript = event.results[lastIndex][0].transcript.toLowerCase().trim();
+        console.log("Nghe thấy:", transcript);
+
+        // LOGIC WAKE WORD
+        // 1. Lệnh BẬT ("AI ON")
+        if (transcript.includes("ai on") || transcript.includes("bật ai") || transcript.includes("trợ lý")) {
+             if (!isAiActive) {
+                 setIsAiActive(true);
+                 setAiResponse("Tôi đang nghe...");
+                 speak("Tôi đang nghe");
+             }
+             return;
+        }
+
+        // 2. Lệnh TẮT ("AI OFF")
+        if (transcript.includes("ai off") || transcript.includes("tắt ai") || transcript.includes("thôi")) {
+             setIsAiActive(false);
+             setAiResponse(null);
+             speak("Đã tắt trợ lý");
+             window.speechSynthesis.cancel();
+             return;
+        }
+
+        // 3. XỬ LÝ CÂU HỎI (Chỉ khi AI Active)
+        if (isAiActive && !isProcessingAi) {
+             // Bỏ qua các từ khóa ngắn hoặc nhiễu
+             if (transcript.length < 5) return;
+
+             setIsProcessingAi(true);
+             try {
+                const answer = await askTrafficLawAssistant(transcript);
+                setAiResponse(answer);
+                speak(answer);
+             } catch (e) {
+                 speak("Có lỗi kết nối.");
+             } finally {
+                 setIsProcessingAi(false);
+                 // Sau khi trả lời xong, vẫn giữ Active để hỏi tiếp, hoặc có thể tắt tùy logic
+             }
+        }
+    };
+
+    recognition.onerror = (event: any) => {
+        // Tự động restart nếu lỗi (để duy trì nghe wake word)
+        if (event.error === 'no-speech') return;
+        console.error("Speech error", event.error);
+    };
+
+    recognition.onend = () => {
+        // Tự động khởi động lại để nghe liên tục (Always Listening Loop)
+        if (appState === AppState.Driving) {
+             try {
+                 recognition.start();
+             } catch(e) {}
+        } else {
+             setIsListening(false);
+        }
+    };
+
+    recognitionRef.current = recognition;
+    try {
+        recognition.start();
+    } catch(e) {}
+
+    return () => {
+        if (recognitionRef.current) recognitionRef.current.stop();
+    };
+  }, [appState, isAiActive, isProcessingAi]);
+
+  // Nút bấm thủ công (Manual Toggle)
+  const toggleAiAssistant = () => {
+      if (isAiActive) {
+          setIsAiActive(false);
+          setAiResponse(null);
+          speak("Đã tắt");
+          window.speechSynthesis.cancel();
+      } else {
+          setIsAiActive(true);
+          setAiResponse("Tôi đang nghe...");
+          speak("Tôi đang nghe");
+          // Đảm bảo recognition đang chạy
+          if (recognitionRef.current && !isListening) {
+              try { recognitionRef.current.start(); } catch(e){}
+          }
+      }
+  };
+
+  const closeAiModal = () => {
+      setAiResponse(null);
+      setIsAiActive(false);
+      window.speechSynthesis.cancel(); 
+  };
+
+
+  // --- LOGIC HỢP NHẤT SPEED LIMIT ---
+  useEffect(() => {
+    if (manualSpeedLimit !== null) {
+        setFinalSpeedLimit(manualSpeedLimit);
+    } else {
+        setFinalSpeedLimit(autoSpeedLimit);
+    }
+  }, [manualSpeedLimit, autoSpeedLimit]);
+
+  // Handle Manual Override Click
+  const cycleSpeedLimit = () => {
+    const limits = [50, 60, 80, 90, 100, 120, null]; 
+    const currentVal = manualSpeedLimit !== null ? manualSpeedLimit : (autoSpeedLimit || 50);
+    let nextIndex = limits.indexOf(currentVal) + 1;
+    if (nextIndex >= limits.length) nextIndex = 0;
+    
+    const nextLimit = limits[nextIndex];
+    setManualSpeedLimit(nextLimit);
+
+    if (nextLimit) {
+        speak(`Đã đặt ${nextLimit}`);
+        saveUserSpeedMarker(position.lat, position.lng, heading, nextLimit, routeInfo.street);
+        setIsUserSaved(true); 
+    } else {
+        speak("Chế độ tự động");
+        setManualSpeedLimit(null);
+    }
+  };
+
+  // Route Calculation ... (Existing code)
   useEffect(() => {
     if (appState === AppState.Driving && routePath && routePath.length > 0) {
-      // Tìm điểm gần nhất trên lộ trình so với vị trí hiện tại
       let minDistance = Infinity;
       let closestIndex = 0;
 
@@ -116,25 +270,19 @@ const App: React.FC = () => {
         }
       }
 
-      // 1. Tách mảng toạ độ
-      // Đoạn đã đi: Từ đầu đến điểm gần nhất (bao gồm cả điểm hiện tại để nối liền mạch)
       const tPath = routePath.slice(0, closestIndex + 1);
-      // Đoạn còn lại: Từ điểm gần nhất đến cuối
       const rPath = routePath.slice(closestIndex);
 
       setTraveledPath(tPath);
       setRemainingPath(rPath);
 
-      // 2. Tính khoảng cách
       const tDist = calculateRouteLength(tPath);
       const rDist = calculateRouteLength(rPath);
 
       setTraveledDistance(tDist);
       setRemainingDistance(rDist);
       
-      // 3. Cập nhật progress bar
       if (totalDistance > 0) {
-        // Cập nhật lại totalDistance dựa trên tổng 2 đoạn để chính xác nhất
         const currentTotal = tDist + rDist;
         setRouteProgress(Math.min(1, Math.max(0, tDist / currentTotal)));
         setTotalDistance(currentTotal);
@@ -144,29 +292,29 @@ const App: React.FC = () => {
     }
   }, [position, routePath, appState]);
 
-  // API Updates (Speed Limit & Features)
+  // API Updates
   useEffect(() => {
     if (gpsStatus !== 'locked' || appState !== AppState.Driving) return;
 
     const updateDrivingData = async () => {
-      // 1. Cập nhật giới hạn tốc độ (mỗi 50m di chuyển) - Dữ liệu thực tế
       if (!lastLimitUpdatePos.current || 
-          Math.abs(position.lat - lastLimitUpdatePos.current.lat) > 0.0005 || 
-          Math.abs(position.lng - lastLimitUpdatePos.current.lng) > 0.0005) {
+          getDistanceFromLatLonInM(position.lat, position.lng, lastLimitUpdatePos.current.lat, lastLimitUpdatePos.current.lng) > 30) {
         
         lastLimitUpdatePos.current = position;
-        const limit = await fetchRealSpeedLimit(position.lat, position.lng);
-        setSpeedLimit(limit);
+        const result = await fetchRealSpeedLimit(position.lat, position.lng, heading);
         
-        if (limit && limit !== speedLimit && speedLimit !== null) {
-             if (limit < speedLimit) speak(`Giới hạn tốc độ ${limit} ki lô mét trên giờ.`);
+        if (result.limit !== null) {
+            setAutoSpeedLimit(result.limit);
+            setIsUserSaved(result.source === 'user'); 
+            
+            if (result.roadName) {
+                setRouteInfo(prev => ({...prev, street: result.roadName!}));
+            }
         }
       }
 
-      // 2. Cập nhật map features (mỗi 300m di chuyển)
       if (!lastFeatureUpdatePos.current || 
-          Math.abs(position.lat - lastFeatureUpdatePos.current.lat) > 0.003 || 
-          Math.abs(position.lng - lastFeatureUpdatePos.current.lng) > 0.003) {
+          getDistanceFromLatLonInM(position.lat, position.lng, lastFeatureUpdatePos.current.lat, lastFeatureUpdatePos.current.lng) > 300) {
           
           lastFeatureUpdatePos.current = position;
           const features = await fetchNearbyMapFeatures(position.lat, position.lng);
@@ -176,24 +324,23 @@ const App: React.FC = () => {
 
     const timer = setTimeout(updateDrivingData, 1000);
     return () => clearTimeout(timer);
-  }, [position, gpsStatus, appState, speedLimit]);
+  }, [position, gpsStatus, appState, heading]);
 
-  // Cảnh báo quá tốc độ
+  // Speed Warning
   useEffect(() => {
     if (appState !== AppState.Driving) return;
     
-    // Chỉ cảnh báo nếu CÓ dữ liệu giới hạn tốc độ thực tế (speedLimit !== null)
-    if (speedLimit !== null && currentSpeed > speedLimit + 2) {
+    if (finalSpeedLimit !== null && currentSpeed > finalSpeedLimit + 2) {
        if (!warning.active || warning.type !== 'speed') {
            setWarning({ type: 'speed', message: 'GIẢM TỐC ĐỘ', active: true });
-           speak(`Bạn đang đi quá tốc độ ${speedLimit}`);
+           speak(`Bạn đang đi quá tốc độ ${finalSpeedLimit}`);
        }
     } else {
        if (warning.active && warning.type === 'speed') {
            setWarning({ type: null, message: '', active: false });
        }
     }
-  }, [currentSpeed, speedLimit, appState, warning.active]);
+  }, [currentSpeed, finalSpeedLimit, appState, warning.active]);
 
   const nearestFeature = useMemo(() => {
     if (mapFeatures.length === 0) return null;
@@ -227,7 +374,6 @@ const App: React.FC = () => {
       const { path } = await getDrivingRoute(start, end);
       setRoutePath(path);
       
-      // Init các giá trị ban đầu
       const totalDist = calculateRouteLength(path);
       setTotalDistance(totalDist);
       setRemainingDistance(totalDist);
@@ -245,13 +391,8 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // --- LOGIC TÍNH TOÁN HƯỚNG HIỂN THỊ (QUAN TRỌNG) ---
-  // Nếu đang lái xe và có lộ trình (remainingPath), hãy dùng hướng của đoạn đường tiếp theo (Course Up)
-  // Nếu không, dùng hướng la bàn GPS (Heading Up)
   const displayHeading = useMemo(() => {
     if (appState === AppState.Driving && remainingPath.length > 1) {
-        // Lấy điểm tiếp theo trên lộ trình để tính hướng (Look ahead)
-        // Dùng index 1 hoặc 2 để có hướng ổn định hơn
         const targetPoint = remainingPath[Math.min(2, remainingPath.length - 1)];
         if (targetPoint) {
             return getBearing(position.lat, position.lng, targetPoint.lat, targetPoint.lng);
@@ -303,7 +444,7 @@ const App: React.FC = () => {
 
           <Dashboard 
             currentSpeed={currentSpeed} 
-            speedLimit={speedLimit} 
+            speedLimit={finalSpeedLimit} 
             warning={warning}
             nextTurnDistance={routeInfo.nextTurn}
             streetName={routeInfo.street}
@@ -313,22 +454,55 @@ const App: React.FC = () => {
             routeProgress={routeProgress}
             totalDistance={totalDistance}
             showProgressBar={!!routePath}
+            isManualMode={manualSpeedLimit !== null || isUserSaved} 
+            onSpeedLimitClick={cycleSpeedLimit}
+            // Pass AI props for Dashboard to display the response text
+            aiResponse={aiResponse}
+            onCloseAi={closeAiModal}
           />
 
+          {/* RIGHT SIDE CONTROLS STACK */}
           <div className="absolute top-[calc(env(safe-area-inset-top)+60px)] right-4 z-[1001] flex flex-col space-y-3">
+            
+            {/* 1. Stop Navigation */}
             <button 
-              onClick={() => { setAppState(AppState.Setup); setRoutePath(undefined); }} 
+              onClick={() => { 
+                setAppState(AppState.Setup); 
+                setRoutePath(undefined);
+                if (recognitionRef.current) recognitionRef.current.stop();
+              }} 
               className="bg-white/90 text-rose-600 p-3 rounded-full shadow-lg border border-gray-200 active:scale-90 transition-transform"
             >
               <Square size={24} fill="currentColor" />
             </button>
             
+            {/* 2. View Mode */}
             <button 
               onClick={toggleViewMode}
               className={`p-3 rounded-full shadow-lg border border-gray-200 active:scale-90 transition-transform flex items-center justify-center ${viewMode === 'direct-view' ? 'bg-emerald-500 text-white border-emerald-600' : 'bg-white/90 text-blue-600'}`}
             >
               {getViewModeIcon()}
             </button>
+
+            {/* 3. AI Traffic Assistant (Mic) */}
+            <button 
+                onClick={toggleAiAssistant}
+                className={`p-3 rounded-full shadow-lg border border-gray-200 active:scale-90 transition-transform flex items-center justify-center relative
+                ${isAiActive 
+                    ? 'bg-rose-500 text-white border-rose-600 animate-pulse ring-4 ring-rose-500/30' 
+                    : isProcessingAi 
+                        ? 'bg-amber-500 text-white' 
+                        : 'bg-white/90 text-indigo-600'
+                }`}
+            >
+                {isProcessingAi ? <Loader2 size={24} className="animate-spin" /> : <Mic size={24} />}
+                
+                {/* Badge ON/OFF status text */}
+                <div className="absolute right-full mr-2 bg-black/50 text-white text-[10px] font-bold px-2 py-0.5 rounded backdrop-blur-sm whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
+                    {isAiActive ? "AI ON" : "AI OFF"}
+                </div>
+            </button>
+
           </div>
         </>
       )}

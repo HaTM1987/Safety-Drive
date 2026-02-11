@@ -1,8 +1,9 @@
 
-import React, { useEffect, useState } from 'react';
-import { MapPin, ArrowRight, Activity, Navigation, ShieldCheck, Share, PlusSquare, Coffee, X, Copy, Check } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { MapPin, ArrowRight, Activity, Navigation, ShieldCheck, Share, PlusSquare, Coffee, X, Copy, Check, Mic, Sparkles } from 'lucide-react';
 import { AutocompleteInput } from './AutocompleteInput';
 import { LocationPoint, Coordinates } from '../types';
+import { speak } from '../services/ttsService';
 
 interface NavigationSetupProps {
   onStartNavigation: (start: LocationPoint | null, end: LocationPoint | null) => void;
@@ -16,10 +17,14 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
   const [isStandalone, setIsStandalone] = useState(false);
   const [showDonate, setShowDonate] = useState(false);
   const [copied, setCopied] = useState(false);
+  
+  // Voice Input State
+  const [isListeningForWakeWord, setIsListeningForWakeWord] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<'idle' | 'listening_command' | 'processing'>('idle');
+  const recognitionRef = useRef<any>(null);
 
-  // Kiểm tra xem app có đang chạy ở chế độ PWA (đã cài đặt) chưa
+  // Kiểm tra chế độ PWA
   useEffect(() => {
-    const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
     const isPWA = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone === true;
     setIsStandalone(isPWA);
 
@@ -31,6 +36,96 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
       });
     }
   }, [currentLocation]); 
+
+  // --- LOGIC NHẬN DIỆN GIỌNG NÓI (HI TÔ) ---
+  const searchLocation = async (query: string): Promise<LocationPoint | null> => {
+      try {
+          const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=vn&limit=1`);
+          const data = await response.json();
+          if (data && data.length > 0) {
+              return {
+                  address: data[0].display_name,
+                  lat: parseFloat(data[0].lat),
+                  lng: parseFloat(data[0].lon)
+              };
+          }
+          return null;
+      } catch (e) { return null; }
+  };
+
+  useEffect(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'vi-VN';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    recognition.onresult = async (event: any) => {
+        const lastIndex = event.results.length - 1;
+        const transcript = event.results[lastIndex][0].transcript.toLowerCase().trim();
+        console.log("Setup Voice:", transcript);
+
+        // 1. Phát hiện Wake Word "Hi Tô"
+        if (transcript.includes("hi tô") || transcript.includes("hi to") || transcript.includes("chào tô")) {
+            setVoiceStatus('listening_command');
+            speak("Tôi đây, mời bạn đọc điểm đi và điểm đến.");
+            return;
+        }
+
+        // 2. Xử lý lệnh nhập liệu (nếu đã kích hoạt)
+        // Mẫu câu: "Từ [A] đến [B]" hoặc "Đi từ [A] tới [B]"
+        if (voiceStatus === 'listening_command') {
+            const regex = /(?:từ|đi)\s+(.+?)\s+(?:đến|tới|về|qua)\s+(.+)/i;
+            const match = transcript.match(regex);
+
+            if (match) {
+                const startQuery = match[1].trim();
+                const endQuery = match[2].trim();
+                
+                setVoiceStatus('processing');
+                speak(`Đang tìm đường từ ${startQuery} đến ${endQuery}`);
+
+                const [startLoc, endLoc] = await Promise.all([
+                    searchLocation(startQuery),
+                    searchLocation(endQuery)
+                ]);
+
+                if (startLoc) setStart(startLoc);
+                if (endLoc) setEnd(endLoc);
+                
+                setVoiceStatus('idle');
+                if (startLoc && endLoc) {
+                    speak("Đã nhập xong dữ liệu.");
+                } else {
+                    speak("Xin lỗi, tôi không tìm thấy địa chỉ này.");
+                }
+            }
+        }
+    };
+
+    recognition.onend = () => {
+        // Tự động khởi động lại để luôn lắng nghe "Hi Tô"
+        if (recognitionRef.current) {
+            try { recognition.start(); } catch(e){}
+        }
+    };
+
+    recognitionRef.current = recognition;
+    try {
+        recognition.start();
+        setIsListeningForWakeWord(true);
+    } catch(e) {}
+
+    return () => {
+        if (recognitionRef.current) {
+            recognitionRef.current.stop();
+            recognitionRef.current = null;
+        }
+    };
+  }, [voiceStatus]);
+
 
   const handleCopy = () => {
     navigator.clipboard.writeText("0071000883469");
@@ -48,7 +143,6 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
         <p className="text-emerald-500 text-[10px] font-black tracking-[0.3em] uppercase mt-1">Vietnam Edition</p>
       </div>
 
-      {/* Install Instruction for iOS Web Users */}
       {!isStandalone && (
         <div className="mb-6 bg-slate-900 border border-white/10 p-4 rounded-2xl animate-fade-in">
            <p className="text-white text-xs font-bold mb-2 text-center uppercase text-emerald-400">Cài đặt ứng dụng</p>
@@ -63,7 +157,7 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
       )}
 
       <div className="space-y-4 mb-8">
-        <div className="bg-slate-900/50 p-1.5 rounded-[2.5rem] border border-white/5 backdrop-blur-md">
+        <div className={`bg-slate-900/50 p-1.5 rounded-[2.5rem] border backdrop-blur-md transition-colors duration-500 ${voiceStatus !== 'idle' ? 'border-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.3)]' : 'border-white/5'}`}>
             <AutocompleteInput 
                 label="Bắt đầu"
                 placeholder="Điểm đi..."
@@ -109,6 +203,32 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
             <Navigation size={16} className="text-emerald-500" />
             <span>Chạy chế độ lái tự do</span>
         </button>
+        
+        {/* --- VOICE TIP SECTION (NEW) --- */}
+        <div className={`relative overflow-hidden rounded-xl border p-4 transition-all duration-300 ${voiceStatus !== 'idle' ? 'bg-emerald-900/20 border-emerald-500/50' : 'bg-slate-900/60 border-white/5'}`}>
+            {voiceStatus !== 'idle' && (
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-emerald-500 to-transparent animate-pulse"></div>
+            )}
+            <div className="flex items-start space-x-3">
+                <div className={`p-2 rounded-full flex-shrink-0 ${voiceStatus !== 'idle' ? 'bg-emerald-500 text-white animate-bounce' : 'bg-white/5 text-emerald-400'}`}>
+                    {voiceStatus === 'processing' ? <Activity size={16} className="animate-spin" /> : <Mic size={16} />}
+                </div>
+                <div>
+                    <div className="flex items-center space-x-2 mb-1">
+                        <Sparkles size={12} className="text-amber-400" />
+                        <p className={`text-xs font-bold uppercase tracking-wider ${voiceStatus !== 'idle' ? 'text-emerald-400' : 'text-slate-400'}`}>
+                            {voiceStatus === 'listening_command' ? 'Đang nghe bạn...' : voiceStatus === 'processing' ? 'Đang tìm địa điểm...' : 'Hỗ trợ rảnh tay'}
+                        </p>
+                    </div>
+                    <p className="text-slate-300 text-[11px] leading-relaxed">
+                        Nói <span className="text-white font-black bg-emerald-600/30 px-1.5 py-0.5 rounded mx-0.5 border border-emerald-500/30">"Hi Tô"</span> để bật nhập liệu.
+                        <br/>
+                        Sau đó đọc: <span className="italic text-emerald-100">"Từ <b>[Điểm A]</b> đến <b>[Điểm B]</b>"</span>
+                    </p>
+                </div>
+            </div>
+        </div>
+
       </div>
 
       {/* Author & Donation Section */}
@@ -152,7 +272,6 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
                 </div>
 
                 <div className="space-y-4">
-                    {/* VietQR Image - Auto generated for Vietcombank */}
                     <div className="bg-slate-50 p-2 rounded-2xl border border-slate-100 shadow-inner flex flex-col items-center overflow-hidden">
                         <img 
                             src="https://img.vietqr.io/image/VCB-0071000883469-compact.png?accountName=TO%20MINH%20HA" 
@@ -161,7 +280,6 @@ export const NavigationSetup: React.FC<NavigationSetupProps> = ({ onStartNavigat
                         />
                     </div>
 
-                    {/* Text Details */}
                     <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 text-sm space-y-2">
                         <div className="flex justify-between items-center border-b border-slate-200 pb-2">
                              <span className="text-slate-500 font-medium text-xs uppercase tracking-wide">Ngân hàng</span>
